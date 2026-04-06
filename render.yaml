@@ -1,0 +1,60 @@
+services:
+  - type: web
+    name: probets-backend
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    rootDir: probets-backend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /odds/sports
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: NODE_ENV
+        value: production
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: "3306"
+      - key: DB_USER
+        sync: false
+      - key: DB_PASS
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: ODDS_API_KEY
+        sync: false
+      - key: SPORTS_MAX_STAKE_PER_BET
+        value: "5000"
+      - key: SPORTS_MAX_EXPOSURE_PER_USER_EVENT_MARKET
+        value: "20000"
+      - key: SPORTS_LIVE_DELAY_SECONDS
+        value: "10"
+      - key: SPORTS_LIVE_QUEUE_ENABLED
+        value: "1"
+      - key: SPORTS_LIVE_QUEUE_MAX_ATTEMPTS
+        value: "5"
+      - key: SPORTS_MARGIN_PCT
+        value: "0"
+      - key: SPORTS_ODDS_PICK
+        value: "min"
+      - key: SPORTS_ALERT_DEAD_RATE
+        value: "0.2"
+      - key: SPORTS_ALERT_LIABILITY
+        value: "100000"
+      - key: SPORTS_ALERT_AUTO_PAUSE_MINUTES
+        value: "5"
+      - key: SYSTEM_ADMIN_ID
+        value: "1"
+      - key: SPORTS_ALLOWED_BOOKMAKERS
+        value: ""
+      - key: TZ
+        value: Asia/Kuala_Lumpur
+
+# Notes:
+# 1) If your repository root is already probets-backend, remove `rootDir`.
+# 2) Render free web service sleeps after inactivity.
+# 3) Run schema.mysql.sql manually on your MySQL before first boot.
