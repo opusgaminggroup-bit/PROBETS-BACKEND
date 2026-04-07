@@ -34,6 +34,7 @@ import { AdminSportsQueueActionDto } from './dto/admin-sports-queue-action.dto';
 import { UpsertLiveGameConfigDto } from '../live-casino/dto/upsert-live-game-config.dto';
 import { AdminPlayersRankingQueryDto } from './dto/admin-players-ranking-query.dto';
 import { AdminPlayersDaysQueryDto } from './dto/admin-players-days-query.dto';
+import { AdminGgrReportQueryDto } from './dto/admin-ggr-report-query.dto';
 
 @ApiTags('admin')
 @ApiBearerAuth()
@@ -252,13 +253,12 @@ export class AdminController {
   }
 
   @Get('reports/ggr')
-  @ApiOperation({ summary: 'GGR 报表（按日期/游戏类型）' })
+  @ApiOperation({ summary: 'GGR 报表（总览/趋势/游戏拆分/代理贡献）' })
   reportGgr(
     @Req() req: Request & { user?: any },
-    @Query('days') days?: string,
-    @Query('gameType') gameType?: string,
+    @Query() query: AdminGgrReportQueryDto,
   ) {
-    return this.adminService.reportGgr(req.user!, Number(days ?? 7), gameType);
+    return this.adminService.reportGgr(req.user!, query);
   }
 
   @Get('reports/agent')

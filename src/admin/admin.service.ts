@@ -26,6 +26,7 @@ import { LiveCasinoService } from '../live-casino/live-casino.service';
 import { BetType } from '../common/enums/bet-type.enum';
 import { UpsertLiveGameConfigDto } from '../live-casino/dto/upsert-live-game-config.dto';
 import { AdminPlayersRankingQueryDto } from './dto/admin-players-ranking-query.dto';
+import { AdminGgrReportQueryDto } from './dto/admin-ggr-report-query.dto';
 
 @Injectable()
 export class AdminService {
@@ -780,32 +781,179 @@ export class AdminService {
     };
   }
 
-  async reportGgr(actor: { userId: string; role: string }, days = 7, gameType?: string) {
+  async reportGgr(actor: { userId: string; role: string }, query: AdminGgrReportQueryDto) {
     const scopedIds = await this.getScopeUserIds(actor);
-    const since = new Date(Date.now() - Math.max(1, Number(days)) * 24 * 3600 * 1000);
 
-    const qb = this.betRepo
+    const hasCustomRange = !!(query.startDate && query.endDate);
+    const start = hasCustomRange
+      ? new Date(query.startDate as string)
+      : new Date(Date.now() - Math.max(1, Number(query.days ?? 30)) * 24 * 3600 * 1000);
+    const end = hasCustomRange ? new Date(query.endDate as string) : new Date();
+    end.setHours(23, 59, 59, 999);
+
+    const startSql = start.toISOString().slice(0, 19).replace('T', ' ');
+    const endSql = end.toISOString().slice(0, 19).replace('T', ' ');
+    const gameType = String(query.gameType ?? 'all').toLowerCase();
+
+    const withScope = (qb: any, alias = 'b') => {
+      qb.andWhere(`${alias}.created_at BETWEEN :start AND :end`, { start: startSql, end: endSql });
+      if (gameType !== 'all') qb.andWhere(`${alias}.bet_type = :gameType`, { gameType });
+      if (scopedIds) qb.andWhere(`${alias}.user_id IN (:...scopedIds)`, { scopedIds });
+      return qb;
+    };
+
+    const summaryQb = withScope(
+      this.betRepo
+        .createQueryBuilder('b')
+        .select('COALESCE(SUM(b.amount), 0)', 'totalStake')
+        .addSelect('COALESCE(SUM(b.payout), 0)', 'totalPayout')
+        .addSelect('COALESCE(COUNT(1), 0)', 'totalBets'),
+    );
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todaySql = todayStart.toISOString().slice(0, 19).replace('T', ' ');
+    const todayQb = this.betRepo
       .createQueryBuilder('b')
-      .select('DATE(b.created_at)', 'date')
-      .addSelect('b.bet_type', 'betType')
-      .addSelect('SUM(b.amount)', 'stake')
-      .addSelect('SUM(b.payout)', 'payout')
-      .where('b.created_at >= :since', { since: since.toISOString().slice(0, 19).replace('T', ' ') })
-      .groupBy('DATE(b.created_at)')
-      .addGroupBy('b.bet_type')
-      .orderBy('DATE(b.created_at)', 'DESC');
+      .select('COALESCE(SUM(b.amount), 0)', 'totalStake')
+      .addSelect('COALESCE(SUM(b.payout), 0)', 'totalPayout')
+      .where('b.created_at >= :today', { today: todaySql });
+    if (gameType !== 'all') todayQb.andWhere('b.bet_type = :gameType', { gameType });
+    if (scopedIds) todayQb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
 
-    if (gameType) qb.andWhere('b.bet_type = :gameType', { gameType });
-    if (scopedIds) qb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+    const prevStart = new Date(start.getTime() - (end.getTime() - start.getTime() + 1));
+    const prevStartSql = prevStart.toISOString().slice(0, 19).replace('T', ' ');
+    const prevEndSql = new Date(start.getTime() - 1).toISOString().slice(0, 19).replace('T', ' ');
+    const prevQb = this.betRepo
+      .createQueryBuilder('b')
+      .select('COALESCE(SUM(b.amount), 0)', 'totalStake')
+      .addSelect('COALESCE(SUM(b.payout), 0)', 'totalPayout')
+      .where('b.created_at BETWEEN :start AND :end', { start: prevStartSql, end: prevEndSql });
+    if (gameType !== 'all') prevQb.andWhere('b.bet_type = :gameType', { gameType });
+    if (scopedIds) prevQb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
 
-    const rows = await qb.getRawMany();
+    const trendQb = withScope(
+      this.betRepo
+        .createQueryBuilder('b')
+        .select('DATE(b.created_at)', 'date')
+        .addSelect('COALESCE(SUM(b.amount),0)', 'totalStake')
+        .addSelect('COALESCE(SUM(b.payout),0)', 'totalPayout')
+        .groupBy('DATE(b.created_at)')
+        .orderBy('DATE(b.created_at)', 'ASC'),
+    );
+
+    const byGameQb = withScope(
+      this.betRepo
+        .createQueryBuilder('b')
+        .select('b.bet_type', 'game')
+        .addSelect('COALESCE(SUM(b.amount),0)', 'totalStake')
+        .addSelect('COALESCE(SUM(b.payout),0)', 'totalPayout')
+        .addSelect('COUNT(1)', 'betCount')
+        .groupBy('b.bet_type')
+        .orderBy('COALESCE(SUM(b.amount - b.payout),0)', 'DESC'),
+    );
+
+    const byAgentQb = withScope(
+      this.betRepo
+        .createQueryBuilder('b')
+        .innerJoin(User, 'p', 'p.id = b.user_id')
+        .leftJoin(User, 'a', 'a.id = p.parent_id')
+        .select("COALESCE(a.id, '0')", 'agentId')
+        .addSelect("COALESCE(a.username, '-')", 'agentName')
+        .addSelect('COALESCE(SUM(b.amount),0)', 'totalStake')
+        .addSelect('COALESCE(SUM(b.payout),0)', 'totalPayout')
+        .addSelect('COUNT(DISTINCT p.id)', 'playersCount')
+        .groupBy('a.id')
+        .addGroupBy('a.username')
+        .orderBy('COALESCE(SUM(b.amount - b.payout),0)', 'DESC')
+        .limit(10),
+    );
+
+    const [summary, today, prev, trendRows, gameRows, agentRows] = await Promise.all([
+      summaryQb.getRawOne(),
+      todayQb.getRawOne(),
+      prevQb.getRawOne(),
+      trendQb.getRawMany(),
+      byGameQb.getRawMany(),
+      byAgentQb.getRawMany(),
+    ]);
+
+    const totalStake = Number(summary?.totalStake ?? 0);
+    const totalPayout = Number(summary?.totalPayout ?? 0);
+    const totalGgr = totalStake - totalPayout;
+
+    const todayGgr = Number(today?.totalStake ?? 0) - Number(today?.totalPayout ?? 0);
+    const prevGgr = Number(prev?.totalStake ?? 0) - Number(prev?.totalPayout ?? 0);
+    const wow = prevGgr === 0 ? (todayGgr > 0 ? 100 : 0) : Number((((todayGgr - prevGgr) / Math.abs(prevGgr)) * 100).toFixed(2));
+
+    const trend = trendRows.map((r) => {
+      const stake = Number(r.totalStake ?? 0);
+      const payout = Number(r.totalPayout ?? 0);
+      return {
+        date: r.date,
+        totalStake: Number(stake.toFixed(2)),
+        ggr: Number((stake - payout).toFixed(2)),
+      };
+    });
+
+    const weekly: Array<{ period: string; ggr: number }> = [];
+    for (let i = 0; i < trend.length; i += 7) {
+      const chunk = trend.slice(i, i + 7);
+      weekly.push({
+        period: `${chunk[0]?.date ?? ''}~${chunk[chunk.length - 1]?.date ?? ''}`,
+        ggr: Number(chunk.reduce((s, x) => s + x.ggr, 0).toFixed(2)),
+      });
+    }
+
+    const gameBreakdown = gameRows.map((r) => {
+      const stake = Number(r.totalStake ?? 0);
+      const payout = Number(r.totalPayout ?? 0);
+      const ggr = stake - payout;
+      const rtp = stake <= 0 ? 0 : Number(((payout / stake) * 100).toFixed(2));
+      return {
+        game: r.game,
+        totalStake: Number(stake.toFixed(2)),
+        ggr: Number(ggr.toFixed(2)),
+        rtp,
+        winRate: Number((100 - rtp).toFixed(2)),
+        betCount: Number(r.betCount ?? 0),
+      };
+    });
+
+    const totalGgrAbsBase = Math.abs(totalGgr) || 1;
+    const agentContribution = agentRows.map((r) => {
+      const stake = Number(r.totalStake ?? 0);
+      const payout = Number(r.totalPayout ?? 0);
+      const ggr = stake - payout;
+      return {
+        agentId: String(r.agentId),
+        agentName: r.agentName,
+        ggr: Number(ggr.toFixed(2)),
+        contributionRatio: Number(((ggr / totalGgrAbsBase) * 100).toFixed(2)),
+        playersCount: Number(r.playersCount ?? 0),
+      };
+    });
+
     return {
       ok: true,
-      data: rows.map((r) => {
-        const stake = Number(r.stake ?? 0);
-        const payout = Number(r.payout ?? 0);
-        return { date: r.date, betType: r.betType, totalStake: stake, totalPayout: payout, ggr: Number((stake - payout).toFixed(2)) };
-      }),
+      data: {
+        overview: {
+          totalGgr: Number(totalGgr.toFixed(2)),
+          todayGgr: Number(todayGgr.toFixed(2)),
+          wow,
+          totalStake: Number(totalStake.toFixed(2)),
+          totalBets: Number(summary?.totalBets ?? 0),
+        },
+        trend,
+        weekly,
+        gameBreakdown,
+        agentContribution,
+      },
+      meta: {
+        startDate: start.toISOString(),
+        endDate: end.toISOString(),
+        gameType,
+      },
     };
   }
 
