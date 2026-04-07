@@ -1,6 +1,10 @@
 import { IsEnum, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 export class CreatePaymentDto {
+  @IsOptional()
+  @IsString()
+  siteKey?: string;
+
   @IsEnum(['deposit', 'withdrawal'])
   type: 'deposit' | 'withdrawal';
 

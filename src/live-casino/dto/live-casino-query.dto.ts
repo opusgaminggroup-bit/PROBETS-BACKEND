@@ -4,6 +4,10 @@ import { IsOptional, IsString, Max, Min } from 'class-validator';
 export class LiveCasinoGamesQueryDto {
   @IsOptional()
   @IsString()
+  siteKey?: string;
+
+  @IsOptional()
+  @IsString()
   provider?: string;
 
   @IsOptional()

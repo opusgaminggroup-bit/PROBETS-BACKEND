@@ -1,6 +1,10 @@
 import { IsBoolean, IsInt, IsOptional, IsString, Min } from 'class-validator';
 
 export class UpsertLiveGameConfigDto {
+  @IsOptional()
+  @IsString()
+  siteKey?: string;
+
   @IsString()
   provider: string;
 

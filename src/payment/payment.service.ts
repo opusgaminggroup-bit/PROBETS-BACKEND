@@ -12,6 +12,7 @@ import { CreditTransactionType } from '../common/enums/credit-transaction-type.e
 import { User } from '../users/entities/user.entity';
 import * as crypto from 'crypto';
 import { AssignCreditDto } from './dto/assign-credit.dto';
+import { SitesService } from '../sites/sites.service';
 
 @Injectable()
 export class PaymentService {
@@ -26,6 +27,7 @@ export class PaymentService {
     @InjectRepository(CreditTransaction)
     private readonly txRepo: Repository<CreditTransaction>,
     private readonly creditService: CreditService,
+    private readonly sitesService: SitesService,
   ) {
     const manual = new ManualAdapter();
     const cryptoA = new CryptoAdapter();
@@ -42,6 +44,15 @@ export class PaymentService {
     return adapter;
   }
 
+  private async resolveSiteContext(siteKey?: string) {
+    const site = await this.sitesService.resolveSite(siteKey);
+    return {
+      siteKey: site?.siteKey ?? siteKey ?? 'default',
+      currency: site?.currency ?? 'MYR',
+      paymentProvider: site?.paymentProvider ?? process.env.PAYMENT_PROVIDER ?? 'manual',
+    };
+  }
+
   async assignCredit(dto: AssignCreditDto) {
     return this.creditService.adjustCredit({
       operatorId: dto.operatorId,
@@ -53,27 +64,29 @@ export class PaymentService {
   }
 
   async createOrder(dto: CreatePaymentDto, provider?: string) {
-    const adapter = this.getAdapter(provider);
+    const siteCtx = await this.resolveSiteContext(dto.siteKey);
+    const adapter = this.getAdapter(provider ?? siteCtx.paymentProvider);
     const orderNo = `PAY${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
     const result = await adapter.createOrder({
       type: dto.type,
       userId: dto.userId,
       amount: dto.amount,
-      currency: dto.currency,
+      currency: dto.currency ?? siteCtx.currency,
       network: dto.network,
       walletAddress: dto.walletAddress,
-      meta: dto.meta,
+      meta: { ...(dto.meta ?? {}), siteKey: siteCtx.siteKey },
     });
 
     const order = this.paymentRepo.create({
       orderNo,
+      siteKey: siteCtx.siteKey,
       type: dto.type,
       provider: adapter.provider,
       status: result.status,
       userId: dto.userId,
       amount: Number(dto.amount).toFixed(2),
-      currency: dto.currency ?? 'MYR',
+      currency: dto.currency ?? siteCtx.currency,
       network: dto.network ?? null,
       walletAddress: result.walletAddress ?? dto.walletAddress ?? null,
       channelRef: result.channelRef ?? null,
@@ -89,7 +102,7 @@ export class PaymentService {
     };
   }
 
-  async listOrders(query: { page?: number; limit?: number; status?: string; type?: string; userId?: string }) {
+  async listOrders(query: { page?: number; limit?: number; status?: string; type?: string; userId?: string; siteKey?: string }) {
     const page = Math.max(1, Number(query.page ?? 1));
     const limit = Math.max(1, Math.min(200, Number(query.limit ?? 20)));
     const qb = this.paymentRepo.createQueryBuilder('p').orderBy('p.created_at', 'DESC');
@@ -97,6 +110,7 @@ export class PaymentService {
     if (query.status) qb.andWhere('p.status = :status', { status: query.status });
     if (query.type) qb.andWhere('p.type = :type', { type: query.type });
     if (query.userId) qb.andWhere('p.user_id = :userId', { userId: query.userId });
+    if (query.siteKey) qb.andWhere('p.site_key = :siteKey', { siteKey: query.siteKey });
 
     qb.skip((page - 1) * limit).take(limit);
     const [items, total] = await qb.getManyAndCount();

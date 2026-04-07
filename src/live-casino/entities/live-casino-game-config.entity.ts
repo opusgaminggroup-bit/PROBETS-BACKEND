@@ -5,6 +5,9 @@ export class LiveCasinoGameConfig {
   @PrimaryGeneratedColumn({ type: 'bigint', unsigned: true })
   id: string;
 
+  @Column({ name: 'site_key', type: 'varchar', length: 50, default: 'default' })
+  siteKey: string;
+
   @Index('idx_live_game_provider_game', { unique: true })
   @Column({ name: 'provider', type: 'varchar', length: 50 })
   provider: string;

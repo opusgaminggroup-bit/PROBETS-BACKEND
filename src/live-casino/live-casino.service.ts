@@ -10,6 +10,7 @@ import { CreditTransactionType } from '../common/enums/credit-transaction-type.e
 import { BetType } from '../common/enums/bet-type.enum';
 import * as crypto from 'crypto';
 import { UpsertLiveGameConfigDto } from './dto/upsert-live-game-config.dto';
+import { SitesService } from '../sites/sites.service';
 import { BetResultStatus } from '../common/enums/bet-result-status.enum';
 import { EvolutionAdapter } from './adapters/evolution.adapter';
 import { PragmaticLiveAdapter } from './adapters/pragmatic-live.adapter';
@@ -31,6 +32,7 @@ export class LiveCasinoService {
     private readonly betRepo: Repository<Bet>,
     @InjectRepository(CreditTransaction)
     private readonly txRepo: Repository<CreditTransaction>,
+    private readonly sitesService: SitesService,
   ) {
     const evo = new EvolutionAdapter();
     const ppl = new PragmaticLiveAdapter();
@@ -40,12 +42,12 @@ export class LiveCasinoService {
     };
   }
 
-  getActiveProviderName() {
-    return String(process.env.LIVE_CASINO_PROVIDER ?? 'evolution').toLowerCase();
+  getActiveProviderName(defaultProvider?: string) {
+    return String(defaultProvider ?? process.env.LIVE_CASINO_PROVIDER ?? 'evolution').toLowerCase();
   }
 
-  getAdapter(provider?: string) {
-    const key = String(provider ?? this.getActiveProviderName()).toLowerCase();
+  getAdapter(provider?: string, defaultProvider?: string) {
+    const key = String(provider ?? this.getActiveProviderName(defaultProvider)).toLowerCase();
     const adapter = this.adapters[key];
     if (!adapter) {
       throw new BadRequestException(`Unsupported live casino provider: ${key}`);
@@ -53,8 +55,18 @@ export class LiveCasinoService {
     return adapter;
   }
 
-  async listGames(query: { provider?: string; category?: string; page?: number; limit?: number }) {
-    const adapter = this.getAdapter(query.provider);
+  private async resolveSiteContext(siteKey?: string) {
+    const site = await this.sitesService.resolveSite(siteKey);
+    return {
+      siteKey: site?.siteKey ?? siteKey ?? 'default',
+      liveCasinoProvider: site?.liveCasinoProvider ?? process.env.LIVE_CASINO_PROVIDER ?? 'evolution',
+      currency: site?.currency ?? process.env.LIVE_CASINO_DEFAULT_CURRENCY ?? 'MYR',
+    };
+  }
+
+  async listGames(query: { siteKey?: string; provider?: string; category?: string; page?: number; limit?: number }) {
+    const siteCtx = await this.resolveSiteContext(query.siteKey);
+    const adapter = this.getAdapter(query.provider, siteCtx.liveCasinoProvider);
     const page = Math.max(1, Number(query.page ?? 1));
     const limit = Math.max(1, Math.min(200, Number(query.limit ?? 20)));
 
@@ -64,7 +76,7 @@ export class LiveCasinoService {
       limit,
     });
 
-    const cfgRows = await this.gameConfigRepo.find({ where: { provider: adapter.provider } as any });
+    const cfgRows = await this.gameConfigRepo.find({ where: { siteKey: siteCtx.siteKey, provider: adapter.provider } as any });
     const cfgMap = new Map(cfgRows.map((x) => [`${x.provider}::${x.gameId}`, x]));
 
     const enriched = items
@@ -94,23 +106,26 @@ export class LiveCasinoService {
   async launchGame(input: {
     userId: string;
     gameId: string;
+    siteKey?: string;
     provider?: string;
     locale?: string;
     currency?: string;
   }) {
-    const adapter = this.getAdapter(input.provider);
+    const siteCtx = await this.resolveSiteContext(input.siteKey);
+    const adapter = this.getAdapter(input.provider, siteCtx.liveCasinoProvider);
 
     const launch = await adapter.launchGame({
       userId: input.userId,
       gameId: input.gameId,
       locale: input.locale,
-      currency: input.currency,
+      currency: input.currency ?? siteCtx.currency,
     });
 
     let session = await this.sessionRepo.findOne({ where: { sessionId: launch.sessionId } });
     if (!session) {
       session = this.sessionRepo.create({
         sessionId: launch.sessionId,
+        siteKey: siteCtx.siteKey,
         provider: adapter.provider,
         gameId: input.gameId,
         userId: input.userId,
@@ -336,13 +351,15 @@ export class LiveCasinoService {
 
   async upsertGameConfig(dto: UpsertLiveGameConfigDto) {
     return this.dataSource.transaction(async (manager) => {
+      const siteKey = dto.siteKey ?? 'default';
       let row = await manager.findOne(LiveCasinoGameConfig, {
-        where: { provider: dto.provider, gameId: dto.gameId },
+        where: { siteKey, provider: dto.provider, gameId: dto.gameId },
         lock: { mode: 'pessimistic_write' },
       });
 
       if (!row) {
         row = manager.create(LiveCasinoGameConfig, {
+          siteKey,
           provider: dto.provider,
           gameId: dto.gameId,
           enabled: dto.enabled ?? true,

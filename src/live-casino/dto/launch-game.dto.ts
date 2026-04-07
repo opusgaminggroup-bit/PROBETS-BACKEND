@@ -6,6 +6,10 @@ export class LaunchGameDto {
 
   @IsOptional()
   @IsString()
+  siteKey?: string;
+
+  @IsOptional()
+  @IsString()
   provider?: string;
 
   @IsOptional()

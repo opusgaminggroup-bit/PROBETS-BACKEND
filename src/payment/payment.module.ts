@@ -6,9 +6,10 @@ import { PaymentOrder } from './entities/payment-order.entity';
 import { User } from '../users/entities/user.entity';
 import { CreditTransaction } from '../credit/entities/credit-transaction.entity';
 import { CreditModule } from '../credit/credit.module';
+import { SitesModule } from '../sites/sites.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([PaymentOrder, User, CreditTransaction]), CreditModule],
+  imports: [TypeOrmModule.forFeature([PaymentOrder, User, CreditTransaction]), CreditModule, SitesModule],
   providers: [PaymentService],
   controllers: [PaymentController],
   exports: [PaymentService],

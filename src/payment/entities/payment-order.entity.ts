@@ -9,6 +9,9 @@ export class PaymentOrder {
   @Column({ name: 'order_no', type: 'varchar', length: 64 })
   orderNo: string;
 
+  @Column({ name: 'site_key', type: 'varchar', length: 50, default: 'default' })
+  siteKey: string;
+
   @Column({ type: 'varchar', length: 20 })
   type: 'assign_credit' | 'deposit' | 'withdrawal';
 

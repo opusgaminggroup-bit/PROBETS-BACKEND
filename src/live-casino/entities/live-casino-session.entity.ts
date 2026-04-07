@@ -9,6 +9,9 @@ export class LiveCasinoSession {
   @Column({ name: 'session_id', type: 'varchar', length: 100 })
   sessionId: string;
 
+  @Column({ name: 'site_key', type: 'varchar', length: 50, default: 'default' })
+  siteKey: string;
+
   @Column({ name: 'provider', type: 'varchar', length: 50 })
   provider: string;
 
