@@ -64,6 +64,7 @@ export class PaymentService {
   }
 
   async createOrder(dto: CreatePaymentDto, provider?: string) {
+    if (!dto.userId) throw new BadRequestException('userId is required');
     const siteCtx = await this.resolveSiteContext(dto.siteKey);
     const adapter = this.getAdapter(provider ?? siteCtx.paymentProvider);
     const orderNo = `PAY${Date.now()}${Math.floor(Math.random() * 1000)}`;

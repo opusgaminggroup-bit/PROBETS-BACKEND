@@ -27,6 +27,8 @@ import { BetType } from '../common/enums/bet-type.enum';
 import { UpsertLiveGameConfigDto } from '../live-casino/dto/upsert-live-game-config.dto';
 import { AdminPlayersRankingQueryDto } from './dto/admin-players-ranking-query.dto';
 import { AdminGgrReportQueryDto } from './dto/admin-ggr-report-query.dto';
+import { UsersService } from '../users/users.service';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class AdminService {
@@ -47,6 +49,8 @@ export class AdminService {
     private readonly betsService: BetsService,
     private readonly creditService: CreditService,
     private readonly liveCasinoService: LiveCasinoService,
+    private readonly usersService: UsersService,
+    private readonly auditService: AuditService,
   ) {}
 
   private async getScopeUserIds(actor: { userId: string; role: string }): Promise<string[] | null> {
@@ -161,35 +165,39 @@ export class AdminService {
     return { ok: true, data: await Promise.all(roots.map((r) => build(r))) };
   }
 
-  async createUser(actor: { userId: string; role: string }, dto: CreateUserDto) {
+  async createUser(actor: { userId: string; username: string; role: string }, dto: CreateUserDto) {
+    // SuperAgent scope restrictions
     if (actor.role === Role.SUPERAGENT) {
       if (dto.parentId && dto.parentId !== actor.userId) {
-        throw new ForbiddenException('Superagent can only create direct children under self');
+        throw new ForbiddenException('SuperAgent can only create direct children under self');
       }
-      dto.parentId = actor.userId;
       if (![Role.AGENT, Role.PLAYER].includes(dto.role)) {
-        throw new ForbiddenException('Superagent can only create agent/player');
+        throw new ForbiddenException('SuperAgent can only create agent or player accounts');
       }
     }
 
-    const user = this.userRepo.create({
-      username: dto.username,
-      passwordHash: dto.passwordHash,
-      role: dto.role,
-      parentId: dto.parentId ?? null,
+    // Force parentId to the actor (controller also does this, but double-guard here)
+    const parentId = actor.role === Role.ADMIN ? (dto.parentId ?? actor.userId) : actor.userId;
+
+    // Delegate to UsersService which handles bcrypt hashing and duplicate checks
+    const saved = await this.usersService.create({ ...dto, parentId });
+    const savedId = String((saved as any).id);
+
+    this.logger.log(`admin.createUser actor=${actor.userId} target=${savedId} role=${(saved as any).role}`);
+
+    void this.auditService.log({
+      actorId: actor.userId,
+      actorUsername: actor.username,
+      actorRole: actor.role,
+      action: 'user.create',
+      targetId: savedId,
+      afterState: { username: (saved as any).username, role: (saved as any).role, parentId },
     });
 
-    const saved = await this.userRepo.save(user);
-    this.logger.log(`admin create user actor=${actor.userId} target=${saved.id} role=${saved.role}`);
-
-    return {
-      ok: true,
-      data: saved,
-      message: 'User created',
-    };
+    return { ok: true, data: saved, message: 'User created' };
   }
 
-  async updateUserStatus(actor: { userId: string; role: string }, id: string, enabled: boolean) {
+  async updateUserStatus(actor: { userId: string; username: string; role: string }, id: string, enabled: boolean) {
     const scopedIds = await this.getScopeUserIds(actor);
     if (scopedIds && !scopedIds.includes(String(id))) {
       throw new ForbiddenException('No access to this user');
@@ -202,12 +210,21 @@ export class AdminService {
       });
       if (!user) throw new NotFoundException('User not found');
 
+      const prevActive = user.isActive;
       user.isActive = enabled;
       await manager.save(User, user);
 
-      this.logger.warn(
-        `admin update status actor=${actor.userId} target=${id} enabled=${String(enabled)}`,
-      );
+      this.logger.warn(`admin update status actor=${actor.userId} target=${id} enabled=${String(enabled)}`);
+
+      void this.auditService.log({
+        actorId: actor.userId,
+        actorUsername: actor.username,
+        actorRole: actor.role,
+        action: enabled ? 'user.status.enable' : 'user.status.disable',
+        targetId: id,
+        beforeState: { isActive: prevActive },
+        afterState:  { isActive: enabled },
+      });
 
       return {
         ok: true,
@@ -217,7 +234,7 @@ export class AdminService {
     });
   }
 
-  async updateUser(actor: { userId: string; role: string }, id: string, dto: UpdateUserDto) {
+  async updateUser(actor: { userId: string; username: string; role: string }, id: string, dto: UpdateUserDto) {
     const scopedIds = await this.getScopeUserIds(actor);
     if (scopedIds && !scopedIds.includes(String(id))) {
       throw new ForbiddenException('No access to this user');
@@ -230,11 +247,28 @@ export class AdminService {
       });
       if (!user) throw new NotFoundException('User not found');
 
+      const before = {
+        isActive: user.isActive,
+        creditLimit: user.creditLimit,
+        parentId: user.parentId,
+      };
+
       if (dto.enabled != null) user.isActive = dto.enabled;
       if (dto.creditLimit != null) user.creditLimit = Number(dto.creditLimit).toFixed(2);
       if (dto.parentId != null && actor.role === Role.ADMIN) user.parentId = dto.parentId;
 
       await manager.save(User, user);
+
+      void this.auditService.log({
+        actorId: actor.userId,
+        actorUsername: actor.username,
+        actorRole: actor.role,
+        action: 'user.update',
+        targetId: id,
+        beforeState: before,
+        afterState: { isActive: user.isActive, creditLimit: user.creditLimit, parentId: user.parentId },
+      });
+
       return { ok: true, data: user, message: 'User updated' };
     });
   }
@@ -320,8 +354,17 @@ export class AdminService {
     return { ok: true, data: bet };
   }
 
-  async settleBet(actor: { userId: string; role: string }, betNo: string, dto: SettleBetDto) {
-    return this.betsService.settleBet({ ...dto, betNo, operatorId: actor.userId });
+  async settleBet(actor: { userId: string; username: string; role: string }, betNo: string, dto: SettleBetDto) {
+    const result = await this.betsService.settleBet({ ...dto, betNo, operatorId: actor.userId });
+    void this.auditService.log({
+      actorId: actor.userId,
+      actorUsername: actor.username,
+      actorRole: actor.role,
+      action: 'bet.settle',
+      targetId: betNo,
+      afterState: { result: dto.result, betNo },
+    });
+    return result;
   }
 
   async getSportsExposure(actor: { userId: string; role: string }) {
@@ -448,7 +491,7 @@ export class AdminService {
   }
 
   async sportsQueueAction(
-    actor: { userId: string; role: string },
+    actor: { userId: string; username: string; role: string },
     action: 'pause' | 'retry' | 'cancel',
     payload: { queueId?: string; minutes?: number },
   ) {
@@ -457,6 +500,13 @@ export class AdminService {
     if (action === 'pause') {
       const mins = Math.max(0, Number(payload.minutes ?? 0));
       const data = await this.betsService.setQueuePause(mins);
+      void this.auditService.log({
+        actorId: actor.userId,
+        actorUsername: actor.username,
+        actorRole: actor.role,
+        action: mins > 0 ? 'queue.pause' : 'queue.resume',
+        afterState: { minutes: mins },
+      });
       return { ok: true, data, message: mins > 0 ? 'queue paused' : 'queue resumed' };
     }
 
@@ -464,10 +514,24 @@ export class AdminService {
 
     if (action === 'retry') {
       const data = await this.betsService.retryQueue(payload.queueId);
+      void this.auditService.log({
+        actorId: actor.userId,
+        actorUsername: actor.username,
+        actorRole: actor.role,
+        action: 'queue.retry',
+        targetId: payload.queueId,
+      });
       return { ok: true, data, message: 'queue retry scheduled' };
     }
 
     const data = await this.betsService.cancelQueue(payload.queueId);
+    void this.auditService.log({
+      actorId: actor.userId,
+      actorUsername: actor.username,
+      actorRole: actor.role,
+      action: 'queue.cancel',
+      targetId: payload.queueId,
+    });
     return { ok: true, data, message: 'queue canceled' };
   }
 
