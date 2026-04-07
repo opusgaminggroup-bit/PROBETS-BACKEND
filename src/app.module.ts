@@ -7,6 +7,7 @@ import { CreditModule } from './credit/credit.module';
 import { BetsModule } from './bets/bets.module';
 import { OddsModule } from './odds/odds.module';
 import { AdminModule } from './admin/admin.module';
+import { LiveCasinoModule } from './live-casino/live-casino.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { AdminModule } from './admin/admin.module';
     CreditModule,
     OddsModule,
     BetsModule,
+    LiveCasinoModule,
     AdminModule,
   ],
 })

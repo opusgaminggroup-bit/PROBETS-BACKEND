@@ -15,6 +15,15 @@ import { Role } from '../common/enums/role.enum';
 import { CreateUserDto } from '../users/dto/create-user.dto';
 import { AdminUsersQueryDto } from './dto/admin-users-query.dto';
 import { AdminCreditTxQueryDto } from './dto/admin-credit-tx-query.dto';
+import { LiveCasinoSession } from '../live-casino/entities/live-casino-session.entity';
+import { AdminBetsQueryDto } from './dto/admin-bets-query.dto';
+import { SettleBetDto } from '../bets/dto/settle-bet.dto';
+import { BetsService } from '../bets/bets.service';
+import { AdjustCreditDto } from '../credit/dto/adjust-credit.dto';
+import { CreditService } from '../credit/credit.service';
+import { UpdateUserDto } from './dto/update-user.dto';
+import { LiveCasinoService } from '../live-casino/live-casino.service';
+import { BetType } from '../common/enums/bet-type.enum';
 
 @Injectable()
 export class AdminService {
@@ -30,6 +39,11 @@ export class AdminService {
     private readonly exposureRepo: Repository<BetExposure>,
     @InjectRepository(SportsBetQueue)
     private readonly queueRepo: Repository<SportsBetQueue>,
+    @InjectRepository(LiveCasinoSession)
+    private readonly liveSessionRepo: Repository<LiveCasinoSession>,
+    private readonly betsService: BetsService,
+    private readonly creditService: CreditService,
+    private readonly liveCasinoService: LiveCasinoService,
   ) {}
 
   private async getScopeUserIds(actor: { userId: string; role: string }): Promise<string[] | null> {
@@ -60,7 +74,7 @@ export class AdminService {
     const page = Math.max(1, Number(query.page ?? 1));
     const limit = Math.max(1, Math.min(200, Number(query.limit ?? 20)));
     const skip = (page - 1) * limit;
-    const sortBy = ['createdAt', 'updatedAt', 'username', 'role', 'creditBalance'].includes(
+    const sortBy = ['createdAt', 'updatedAt', 'username', 'role', 'creditBalance', 'creditLimit'].includes(
       String(query.sortBy ?? ''),
     )
       ? String(query.sortBy)
@@ -74,6 +88,8 @@ export class AdminService {
     if (query.role) qb.andWhere('u.role = :role', { role: query.role });
     if (query.parentId) qb.andWhere('u.parent_id = :parentId', { parentId: query.parentId });
     if (query.username) qb.andWhere('u.username LIKE :username', { username: `%${query.username}%` });
+    if (query.minCreditBalance != null) qb.andWhere('u.credit_balance >= :minCreditBalance', { minCreditBalance: query.minCreditBalance });
+    if (query.maxCreditBalance != null) qb.andWhere('u.credit_balance <= :maxCreditBalance', { maxCreditBalance: query.maxCreditBalance });
 
     qb.orderBy(`u.${sortBy}`, sortOrder as 'ASC' | 'DESC').skip(skip).take(limit);
 
@@ -100,8 +116,8 @@ export class AdminService {
     const user = await this.userRepo.findOne({ where: { id } });
     if (!user) throw new NotFoundException('User not found');
 
-    const [childrenCount, recentBets] = await Promise.all([
-      this.userRepo.count({ where: { parentId: id } }),
+    const [children, recentBets] = await Promise.all([
+      this.userRepo.find({ where: { parentId: id }, select: { id: true, username: true, role: true, isActive: true } as any }),
       this.betRepo.find({
         where: { userId: id },
         order: { createdAt: 'DESC' },
@@ -113,10 +129,33 @@ export class AdminService {
       ok: true,
       data: {
         ...user,
-        childrenCount,
+        children,
+        childrenCount: children.length,
         recentBets,
       },
     };
+  }
+
+  async getAgentTree(actor: { userId: string; role: string }) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const roots = actor.role === Role.ADMIN
+      ? await this.userRepo.find({ where: { role: Role.SUPERAGENT } as any })
+      : await this.userRepo.find({ where: { id: actor.userId } as any });
+
+    const build = async (node: User, depth = 0): Promise<any> => {
+      if (depth > 3) return { id: node.id, username: node.username, role: node.role, children: [] };
+      const children = await this.userRepo.find({ where: { parentId: node.id } });
+      const filtered = scopedIds ? children.filter((c) => scopedIds.includes(String(c.id))) : children;
+      return {
+        id: node.id,
+        username: node.username,
+        role: node.role,
+        isActive: node.isActive,
+        children: await Promise.all(filtered.map((c) => build(c, depth + 1))),
+      };
+    };
+
+    return { ok: true, data: await Promise.all(roots.map((r) => build(r))) };
   }
 
   async createUser(actor: { userId: string; role: string }, dto: CreateUserDto) {
@@ -175,6 +214,28 @@ export class AdminService {
     });
   }
 
+  async updateUser(actor: { userId: string; role: string }, id: string, dto: UpdateUserDto) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    if (scopedIds && !scopedIds.includes(String(id))) {
+      throw new ForbiddenException('No access to this user');
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const user = await manager.findOne(User, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!user) throw new NotFoundException('User not found');
+
+      if (dto.enabled != null) user.isActive = dto.enabled;
+      if (dto.creditLimit != null) user.creditLimit = Number(dto.creditLimit).toFixed(2);
+      if (dto.parentId != null && actor.role === Role.ADMIN) user.parentId = dto.parentId;
+
+      await manager.save(User, user);
+      return { ok: true, data: user, message: 'User updated' };
+    });
+  }
+
   async listCreditTransactions(
     actor: { userId: string; role: string },
     query: AdminCreditTxQueryDto,
@@ -220,6 +281,46 @@ export class AdminService {
     };
   }
 
+  async adminCreditAdjust(actor: { userId: string; role: string }, dto: AdjustCreditDto) {
+    return this.creditService.adjustCredit({ ...dto, operatorId: actor.userId });
+  }
+
+  async listBets(actor: { userId: string; role: string }, query: AdminBetsQueryDto) {
+    const page = Math.max(1, Number(query.page ?? 1));
+    const limit = Math.max(1, Math.min(200, Number(query.limit ?? 20)));
+    const skip = (page - 1) * limit;
+    const sortBy = ['createdAt', 'amount', 'settledAt', 'betType'].includes(String(query.sortBy ?? ''))
+      ? String(query.sortBy)
+      : 'createdAt';
+    const sortOrder = String(query.sortOrder ?? 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const scopedIds = await this.getScopeUserIds(actor);
+
+    const qb = this.betRepo.createQueryBuilder('b');
+    if (query.betType) qb.andWhere('b.bet_type = :betType', { betType: query.betType });
+    if (query.resultStatus) qb.andWhere('b.result_status = :resultStatus', { resultStatus: query.resultStatus });
+    if (query.userId) qb.andWhere('b.user_id = :userId', { userId: query.userId });
+    if (query.startDate) qb.andWhere('b.created_at >= :startDate', { startDate: query.startDate });
+    if (query.endDate) qb.andWhere('b.created_at <= :endDate', { endDate: query.endDate });
+    if (scopedIds) qb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+
+    qb.orderBy(`b.${sortBy}`, sortOrder as 'ASC' | 'DESC').skip(skip).take(limit);
+    const [items, total] = await qb.getManyAndCount();
+
+    return { ok: true, data: items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) || 1 } };
+  }
+
+  async getBetByNo(actor: { userId: string; role: string }, betNo: string) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const bet = await this.betRepo.findOne({ where: { betNo } });
+    if (!bet) throw new NotFoundException('Bet not found');
+    if (scopedIds && !scopedIds.includes(String(bet.userId))) throw new ForbiddenException('No access to this bet');
+    return { ok: true, data: bet };
+  }
+
+  async settleBet(actor: { userId: string; role: string }, betNo: string, dto: SettleBetDto) {
+    return this.betsService.settleBet({ ...dto, betNo, operatorId: actor.userId });
+  }
+
   async getSportsExposure(actor: { userId: string; role: string }) {
     const scopedIds = await this.getScopeUserIds(actor);
 
@@ -254,17 +355,14 @@ export class AdminService {
     };
   }
 
-  async getSportsDashboard(actor: { userId: string; role: string }) {
+  async getSportsDashboard(actor: { userId: string; role: string }, days = 7) {
     const scopedIds = await this.getScopeUserIds(actor);
     const now = new Date();
     const dayStart = new Date(now);
     dayStart.setHours(0, 0, 0, 0);
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
+    const nDaysAgo = new Date(now.getTime() - Math.max(1, Number(days)) * 24 * 3600 * 1000);
 
-    const betBase = this.betRepo.createQueryBuilder('b');
-    if (scopedIds) betBase.where('b.user_id IN (:...scopedIds)', { scopedIds });
-
-    const [today, sevenDays, active, exposureTop, queueRows] = await Promise.all([
+    const [today, nDays, active, exposureTop, queueRows, liveStats] = await Promise.all([
       (async () => {
         const qb = this.betRepo
           .createQueryBuilder('b')
@@ -279,8 +377,8 @@ export class AdminService {
           .createQueryBuilder('b')
           .select('SUM(b.amount)', 'stake')
           .addSelect('SUM(b.payout)', 'payout')
-          .where('b.created_at >= :sevenDaysAgo', {
-            sevenDaysAgo: sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' '),
+          .where('b.created_at >= :nDaysAgo', {
+            nDaysAgo: nDaysAgo.toISOString().slice(0, 19).replace('T', ' '),
           });
         if (scopedIds) qb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
         return qb.getRawOne();
@@ -289,32 +387,20 @@ export class AdminService {
         const qb = this.betRepo
           .createQueryBuilder('b')
           .select('COUNT(DISTINCT b.user_id)', 'activeUsers')
-          .where('b.created_at >= :sevenDaysAgo', {
-            sevenDaysAgo: sevenDaysAgo.toISOString().slice(0, 19).replace('T', ' '),
+          .where('b.created_at >= :nDaysAgo', {
+            nDaysAgo: nDaysAgo.toISOString().slice(0, 19).replace('T', ' '),
           });
         if (scopedIds) qb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
         return qb.getRawOne();
       })(),
-      (async () => {
-        const qb = this.exposureRepo
-          .createQueryBuilder('e')
-          .select('e.event_id', 'eventId')
-          .addSelect('e.market_key', 'marketKey')
-          .addSelect('SUM(e.total_stake)', 'totalStake')
-          .addSelect('SUM(e.total_potential_payout)', 'totalPotentialPayout')
-          .groupBy('e.event_id')
-          .addGroupBy('e.market_key')
-          .orderBy('SUM(e.total_potential_payout)', 'DESC')
-          .take(10);
-        if (scopedIds) qb.where('e.user_id IN (:...scopedIds)', { scopedIds });
-        return qb.getRawMany();
-      })(),
+      this.getSportsExposure(actor).then((x) => x.data.slice(0, 10)),
       this.queueRepo
         .createQueryBuilder('q')
         .select('q.status', 'status')
         .addSelect('COUNT(1)', 'count')
         .groupBy('q.status')
         .getRawMany(),
+      this.getLiveCasinoStats(actor).then((x) => x.data),
     ]);
 
     const toMetrics = (row: any) => {
@@ -339,22 +425,140 @@ export class AdminService {
       ok: true,
       data: {
         today: toMetrics(today),
-        last7Days: toMetrics(sevenDays),
-        activeUsers7Days: Number(active?.activeUsers ?? 0),
-        exposureTop: exposureTop.map((r) => {
-          const stake = Number(r.totalStake ?? 0);
-          const payout = Number(r.totalPotentialPayout ?? 0);
-          return {
-            eventId: r.eventId,
-            marketKey: r.marketKey,
-            totalStake: Number(stake.toFixed(2)),
-            totalPotentialPayout: Number(payout.toFixed(2)),
-            worstCaseLiability: Number(Math.max(0, payout - stake).toFixed(2)),
-          };
-        }),
+        lastNDays: toMetrics(nDays),
+        activeUsers: Number(active?.activeUsers ?? 0),
+        sportsExposureTop: exposureTop,
         queueStatus: queueMap,
+        liveCasino: liveStats,
         generatedAt: new Date().toISOString(),
       },
+    };
+  }
+
+  async listSportsQueue(actor: { userId: string; role: string }, status?: string) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const qb = this.queueRepo.createQueryBuilder('q').orderBy('q.created_at', 'DESC').take(200);
+    if (status) qb.andWhere('q.status = :status', { status });
+    if (scopedIds) qb.andWhere('q.user_id IN (:...scopedIds)', { scopedIds });
+    const items = await qb.getMany();
+    return { ok: true, data: items };
+  }
+
+  async listLiveCasinoGames(actor: { userId: string; role: string }, provider?: string, category?: string, page = 1, limit = 20) {
+    await this.getScopeUserIds(actor);
+    return this.liveCasinoService.listGames({ provider, category, page, limit });
+  }
+
+  async listLiveCasinoSessions(actor: { userId: string; role: string }, page = 1, limit = 20) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const qb = this.liveSessionRepo.createQueryBuilder('s').orderBy('s.created_at', 'DESC');
+    if (scopedIds) qb.andWhere('s.user_id IN (:...scopedIds)', { scopedIds });
+    qb.skip((page - 1) * limit).take(limit);
+    const [items, total] = await qb.getManyAndCount();
+    return { ok: true, data: items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) || 1 } };
+  }
+
+  async getLiveCasinoProviders(actor: { userId: string; role: string }) {
+    await this.getScopeUserIds(actor);
+    return this.liveCasinoService.providerStatuses();
+  }
+
+  async getLiveCasinoStats(actor: { userId: string; role: string }) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const qb = this.betRepo
+      .createQueryBuilder('b')
+      .select('SUM(b.amount)', 'stake')
+      .addSelect('SUM(b.payout)', 'payout')
+      .addSelect('COUNT(1)', 'count')
+      .where('b.bet_type = :betType', { betType: BetType.LIVE_CASINO });
+    if (scopedIds) qb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+    const sums = await qb.getRawOne();
+
+    const topQb = this.betRepo
+      .createQueryBuilder('b')
+      .select('b.event_id', 'gameId')
+      .addSelect('COUNT(1)', 'count')
+      .where('b.bet_type = :betType', { betType: BetType.LIVE_CASINO })
+      .groupBy('b.event_id')
+      .orderBy('COUNT(1)', 'DESC')
+      .take(10);
+    if (scopedIds) topQb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+    const topGames = await topQb.getRawMany();
+
+    const stake = Number(sums?.stake ?? 0);
+    const payout = Number(sums?.payout ?? 0);
+
+    return {
+      ok: true,
+      data: {
+        totalBets: Number(sums?.count ?? 0),
+        totalStake: Number(stake.toFixed(2)),
+        totalPayout: Number(payout.toFixed(2)),
+        ggr: Number((stake - payout).toFixed(2)),
+        topGames,
+      },
+    };
+  }
+
+  async reportGgr(actor: { userId: string; role: string }, days = 7, gameType?: string) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const since = new Date(Date.now() - Math.max(1, Number(days)) * 24 * 3600 * 1000);
+
+    const qb = this.betRepo
+      .createQueryBuilder('b')
+      .select('DATE(b.created_at)', 'date')
+      .addSelect('b.bet_type', 'betType')
+      .addSelect('SUM(b.amount)', 'stake')
+      .addSelect('SUM(b.payout)', 'payout')
+      .where('b.created_at >= :since', { since: since.toISOString().slice(0, 19).replace('T', ' ') })
+      .groupBy('DATE(b.created_at)')
+      .addGroupBy('b.bet_type')
+      .orderBy('DATE(b.created_at)', 'DESC');
+
+    if (gameType) qb.andWhere('b.bet_type = :gameType', { gameType });
+    if (scopedIds) qb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+
+    const rows = await qb.getRawMany();
+    return {
+      ok: true,
+      data: rows.map((r) => {
+        const stake = Number(r.stake ?? 0);
+        const payout = Number(r.payout ?? 0);
+        return { date: r.date, betType: r.betType, totalStake: stake, totalPayout: payout, ggr: Number((stake - payout).toFixed(2)) };
+      }),
+    };
+  }
+
+  async reportAgent(actor: { userId: string; role: string }, days = 7) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const since = new Date(Date.now() - Math.max(1, Number(days)) * 24 * 3600 * 1000);
+
+    const qb = this.txRepo
+      .createQueryBuilder('tx')
+      .innerJoin(User, 'u', 'u.id = tx.user_id')
+      .select('u.parent_id', 'agentId')
+      .addSelect('SUM(CASE WHEN tx.type = :addType THEN tx.amount ELSE 0 END)', 'totalAdd')
+      .addSelect('SUM(CASE WHEN tx.type = :subType THEN ABS(tx.amount) ELSE 0 END)', 'totalSub')
+      .where('tx.created_at >= :since', { since: since.toISOString().slice(0, 19).replace('T', ' ') })
+      .setParameters({ addType: 'add_credit', subType: 'subtract_credit' })
+      .groupBy('u.parent_id')
+      .orderBy('SUM(CASE WHEN tx.type = :addType THEN tx.amount ELSE 0 END)', 'DESC');
+
+    if (scopedIds) qb.andWhere('(u.parent_id IN (:...scopedIds) OR tx.user_id IN (:...scopedIds))', { scopedIds });
+
+    const rows = await qb.getRawMany();
+    return {
+      ok: true,
+      data: rows.map((r) => {
+        const add = Number(r.totalAdd ?? 0);
+        const sub = Number(r.totalSub ?? 0);
+        return {
+          agentId: r.agentId,
+          totalAdd: Number(add.toFixed(2)),
+          totalRecycle: Number(sub.toFixed(2)),
+          net: Number((add - sub).toFixed(2)),
+        };
+      }),
     };
   }
 }

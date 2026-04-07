@@ -1,4 +1,5 @@
-import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsEnum, IsOptional, IsString, Min } from 'class-validator';
 import { Role } from '../../common/enums/role.enum';
 import { PaginationQueryDto } from './admin-query.dto';
 
@@ -14,4 +15,14 @@ export class AdminUsersQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsString()
   username?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @Min(0)
+  minCreditBalance?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @Min(0)
+  maxCreditBalance?: number;
 }

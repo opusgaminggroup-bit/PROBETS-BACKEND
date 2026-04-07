@@ -3,5 +3,6 @@ export enum BetType {
   DICE = 'dice',
   PLINKO = 'plinko',
   BACCARAT = 'baccarat',
+  LIVE_CASINO = 'live-casino',
   CRASH = 'crash',
 }
