@@ -32,6 +32,8 @@ import { SettleBetDto } from '../bets/dto/settle-bet.dto';
 import { AdminDashboardQueryDto } from './dto/admin-dashboard-query.dto';
 import { AdminSportsQueueActionDto } from './dto/admin-sports-queue-action.dto';
 import { UpsertLiveGameConfigDto } from '../live-casino/dto/upsert-live-game-config.dto';
+import { AdminPlayersRankingQueryDto } from './dto/admin-players-ranking-query.dto';
+import { AdminPlayersDaysQueryDto } from './dto/admin-players-days-query.dto';
 
 @ApiTags('admin')
 @ApiBearerAuth()
@@ -214,6 +216,39 @@ export class AdminController {
       queueId: dto.queueId,
       minutes: dto.minutes,
     });
+  }
+
+  @Get('players/ranking')
+  @ApiOperation({ summary: '会员排行榜（支持分页/排序/搜索）' })
+  playersRanking(
+    @Req() req: Request & { user?: any },
+    @Query() query: AdminPlayersRankingQueryDto,
+  ) {
+    return this.adminService.getPlayersRanking(req.user!, query);
+  }
+
+  @Get('players/credit-distribution')
+  @ApiOperation({ summary: '会员信用分布（饼图+按代理分组）' })
+  playersCreditDistribution(
+    @Req() req: Request & { user?: any },
+    @Query() query: AdminPlayersDaysQueryDto,
+  ) {
+    return this.adminService.getPlayersCreditDistribution(req.user!, Number(query.days ?? 30));
+  }
+
+  @Get('players/betting-behavior')
+  @ApiOperation({ summary: '会员投注行为（趋势/活跃榜/游戏占比）' })
+  playersBettingBehavior(
+    @Req() req: Request & { user?: any },
+    @Query() query: AdminPlayersDaysQueryDto,
+  ) {
+    return this.adminService.getPlayersBettingBehavior(req.user!, Number(query.days ?? 30));
+  }
+
+  @Get('players/:playerId')
+  @ApiOperation({ summary: '单个会员详情（基础信息+信用历史+最近投注）' })
+  playerDetail(@Req() req: Request & { user?: any }, @Param('playerId') playerId: string) {
+    return this.adminService.getPlayerDetail(req.user!, playerId);
   }
 
   @Get('reports/ggr')

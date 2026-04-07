@@ -25,6 +25,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { LiveCasinoService } from '../live-casino/live-casino.service';
 import { BetType } from '../common/enums/bet-type.enum';
 import { UpsertLiveGameConfigDto } from '../live-casino/dto/upsert-live-game-config.dto';
+import { AdminPlayersRankingQueryDto } from './dto/admin-players-ranking-query.dto';
 
 @Injectable()
 export class AdminService {
@@ -526,6 +527,255 @@ export class AdminService {
         totalPayout: Number(payout.toFixed(2)),
         ggr: Number((stake - payout).toFixed(2)),
         topGames,
+      },
+    };
+  }
+
+  async getPlayersRanking(actor: { userId: string; role: string }, query: AdminPlayersRankingQueryDto) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const days = Math.max(1, Math.min(90, Number(query.days ?? 30)));
+    const page = Math.max(1, Number(query.page ?? 1));
+    const limit = Math.max(1, Math.min(100, Number(query.limit ?? 20)));
+    const skip = (page - 1) * limit;
+    const sortMap: Record<string, string> = {
+      totalBet: 'totalBet',
+      netContribution: 'netContribution',
+      creditBalance: 'creditBalance',
+      lastActive: 'lastActive',
+    };
+    const sortKey = sortMap[String(query.sort ?? 'totalBet')] ?? 'totalBet';
+    const sortOrder = String(query.order ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const since = new Date(Date.now() - days * 24 * 3600 * 1000);
+
+    const qb = this.userRepo
+      .createQueryBuilder('p')
+      .leftJoin(User, 'a', 'a.id = p.parent_id')
+      .leftJoin(User, 'sa', 'sa.id = a.parent_id')
+      .leftJoin(Bet, 'b', 'b.user_id = p.id AND b.created_at >= :since', {
+        since: since.toISOString().slice(0, 19).replace('T', ' '),
+      })
+      .select('p.id', 'id')
+      .addSelect('p.username', 'username')
+      .addSelect("COALESCE(a.username, '-')", 'agentName')
+      .addSelect("COALESCE(sa.username, '-')", 'superAgentName')
+      .addSelect('COALESCE(SUM(b.amount), 0)', 'totalBet')
+      .addSelect('COALESCE(SUM(b.payout - b.amount), 0)', 'totalPnl')
+      .addSelect('COALESCE(SUM(b.amount - b.payout), 0)', 'netContribution')
+      .addSelect('p.credit_balance', 'creditBalance')
+      .addSelect('MAX(b.created_at)', 'lastActive')
+      .where('p.role = :playerRole', { playerRole: Role.PLAYER })
+      .groupBy('p.id')
+      .addGroupBy('p.username')
+      .addGroupBy('a.username')
+      .addGroupBy('sa.username')
+      .addGroupBy('p.credit_balance');
+
+    if (query.search) qb.andWhere('p.username LIKE :search', { search: `%${query.search}%` });
+    if (query.agentId) qb.andWhere('p.parent_id = :agentId', { agentId: query.agentId });
+
+    if (scopedIds) {
+      qb.andWhere('(p.id IN (:...scopedIds) OR p.parent_id IN (:...scopedIds))', { scopedIds });
+    }
+
+    qb.orderBy(sortKey, sortOrder as 'ASC' | 'DESC').offset(skip).limit(limit);
+    const items = await qb.getRawMany();
+
+    const countQb = this.userRepo
+      .createQueryBuilder('p')
+      .select('COUNT(1)', 'total')
+      .where('p.role = :playerRole', { playerRole: Role.PLAYER });
+    if (query.search) countQb.andWhere('p.username LIKE :search', { search: `%${query.search}%` });
+    if (query.agentId) countQb.andWhere('p.parent_id = :agentId', { agentId: query.agentId });
+    if (scopedIds) countQb.andWhere('(p.id IN (:...scopedIds) OR p.parent_id IN (:...scopedIds))', { scopedIds });
+    const total = Number((await countQb.getRawOne())?.total ?? 0);
+
+    return {
+      ok: true,
+      data: items.map((x) => ({
+        id: String(x.id),
+        username: x.username,
+        agentName: x.agentName,
+        superAgentName: x.superAgentName,
+        totalBet: Number(Number(x.totalBet ?? 0).toFixed(2)),
+        totalPnl: Number(Number(x.totalPnl ?? 0).toFixed(2)),
+        netContribution: Number(Number(x.netContribution ?? 0).toFixed(2)),
+        creditBalance: Number(Number(x.creditBalance ?? 0).toFixed(2)),
+        lastActive: x.lastActive,
+      })),
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) || 1 },
+    };
+  }
+
+  async getPlayersCreditDistribution(actor: { userId: string; role: string }, days = 30) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const since = new Date(Date.now() - Math.max(1, Number(days)) * 24 * 3600 * 1000);
+
+    const bucketQb = this.userRepo
+      .createQueryBuilder('p')
+      .select(`SUM(CASE WHEN p.credit_balance > 10000 THEN 1 ELSE 0 END)`, 'high')
+      .addSelect(`SUM(CASE WHEN p.credit_balance > 1000 AND p.credit_balance <= 10000 THEN 1 ELSE 0 END)`, 'mid')
+      .addSelect(`SUM(CASE WHEN p.credit_balance > 0 AND p.credit_balance <= 1000 THEN 1 ELSE 0 END)`, 'low')
+      .addSelect(`SUM(CASE WHEN p.credit_balance = 0 THEN 1 ELSE 0 END)`, 'zero')
+      .where('p.role = :playerRole', { playerRole: Role.PLAYER });
+    if (scopedIds) bucketQb.andWhere('(p.id IN (:...scopedIds) OR p.parent_id IN (:...scopedIds))', { scopedIds });
+    const buckets = await bucketQb.getRawOne();
+
+    const byAgentQb = this.userRepo
+      .createQueryBuilder('p')
+      .leftJoin(User, 'a', 'a.id = p.parent_id')
+      .select("COALESCE(a.username, '-')", 'agent')
+      .addSelect('COALESCE(SUM(p.credit_balance), 0)', 'totalCredit')
+      .where('p.role = :playerRole', { playerRole: Role.PLAYER })
+      .groupBy('a.username')
+      .orderBy('SUM(p.credit_balance)', 'DESC');
+    if (scopedIds) byAgentQb.andWhere('(p.id IN (:...scopedIds) OR p.parent_id IN (:...scopedIds))', { scopedIds });
+
+    const relationQb = this.userRepo
+      .createQueryBuilder('p')
+      .leftJoin(Bet, 'b', 'b.user_id = p.id AND b.created_at >= :since', {
+        since: since.toISOString().slice(0, 19).replace('T', ' '),
+      })
+      .select('p.username', 'username')
+      .addSelect('p.credit_balance', 'credit')
+      .addSelect('COALESCE(SUM(b.amount), 0)', 'bet')
+      .where('p.role = :playerRole', { playerRole: Role.PLAYER })
+      .groupBy('p.id')
+      .addGroupBy('p.username')
+      .addGroupBy('p.credit_balance')
+      .orderBy('COALESCE(SUM(b.amount), 0)', 'DESC')
+      .limit(300);
+    if (scopedIds) relationQb.andWhere('(p.id IN (:...scopedIds) OR p.parent_id IN (:...scopedIds))', { scopedIds });
+
+    const [byAgent, relation] = await Promise.all([byAgentQb.getRawMany(), relationQb.getRawMany()]);
+
+    return {
+      ok: true,
+      data: {
+        buckets: [
+          { label: '高信用', value: Number(buckets?.high ?? 0) },
+          { label: '中信用', value: Number(buckets?.mid ?? 0) },
+          { label: '低信用', value: Number(buckets?.low ?? 0) },
+          { label: '零信用', value: Number(buckets?.zero ?? 0) },
+        ],
+        byAgent: byAgent.map((r) => ({ agent: r.agent, totalCredit: Number(Number(r.totalCredit ?? 0).toFixed(2)) })),
+        relation: relation.map((r) => ({ username: r.username, credit: Number(Number(r.credit ?? 0).toFixed(2)), bet: Number(Number(r.bet ?? 0).toFixed(2)) })),
+      },
+    };
+  }
+
+  async getPlayersBettingBehavior(actor: { userId: string; role: string }, days = 30) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    const safeDays = Math.max(1, Math.min(90, Number(days)));
+    const since = new Date(Date.now() - safeDays * 24 * 3600 * 1000);
+    const sinceSql = since.toISOString().slice(0, 19).replace('T', ' ');
+
+    const trendQb = this.betRepo
+      .createQueryBuilder('b')
+      .select('DATE(b.created_at)', 'day')
+      .addSelect('COALESCE(SUM(b.amount), 0)', 'totalBet')
+      .where('b.created_at >= :since', { since: sinceSql })
+      .groupBy('DATE(b.created_at)')
+      .orderBy('DATE(b.created_at)', 'ASC');
+    if (scopedIds) trendQb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+
+    const activeQb = this.betRepo
+      .createQueryBuilder('b')
+      .innerJoin(User, 'p', 'p.id = b.user_id')
+      .select('p.username', 'username')
+      .addSelect('COUNT(1)', 'frequency')
+      .addSelect('COALESCE(SUM(b.amount), 0)', 'totalBet')
+      .where('b.created_at >= :since', { since: sinceSql })
+      .groupBy('p.username')
+      .orderBy('COUNT(1)', 'DESC')
+      .addOrderBy('COALESCE(SUM(b.amount), 0)', 'DESC')
+      .limit(20);
+    if (scopedIds) activeQb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+
+    const gameShareQb = this.betRepo
+      .createQueryBuilder('b')
+      .select('b.bet_type', 'game')
+      .addSelect('COUNT(1)', 'value')
+      .where('b.created_at >= :since', { since: sinceSql })
+      .groupBy('b.bet_type')
+      .orderBy('COUNT(1)', 'DESC');
+    if (scopedIds) gameShareQb.andWhere('b.user_id IN (:...scopedIds)', { scopedIds });
+
+    const [trend, activeTop, gameShare] = await Promise.all([
+      trendQb.getRawMany(),
+      activeQb.getRawMany(),
+      gameShareQb.getRawMany(),
+    ]);
+
+    return {
+      ok: true,
+      data: {
+        trend: trend.map((r) => ({ day: r.day, totalBet: Number(Number(r.totalBet ?? 0).toFixed(2)) })),
+        activeTop: activeTop.map((r) => ({ username: r.username, frequency: Number(r.frequency ?? 0), totalBet: Number(Number(r.totalBet ?? 0).toFixed(2)) })),
+        gameShare: gameShare.map((r) => ({ game: r.game, value: Number(r.value ?? 0) })),
+      },
+    };
+  }
+
+  async getPlayerDetail(actor: { userId: string; role: string }, playerId: string) {
+    const scopedIds = await this.getScopeUserIds(actor);
+    if (scopedIds && !scopedIds.includes(String(playerId))) {
+      throw new ForbiddenException('No access to this player');
+    }
+
+    const player = await this.userRepo
+      .createQueryBuilder('p')
+      .leftJoin(User, 'a', 'a.id = p.parent_id')
+      .leftJoin(User, 'sa', 'sa.id = a.parent_id')
+      .select('p.id', 'id')
+      .addSelect('p.username', 'username')
+      .addSelect('p.credit_balance', 'creditBalance')
+      .addSelect("COALESCE(a.username, '-')", 'agentName')
+      .addSelect("COALESCE(sa.username, '-')", 'superAgentName')
+      .where('p.id = :playerId', { playerId })
+      .andWhere('p.role = :playerRole', { playerRole: Role.PLAYER })
+      .getRawOne();
+
+    if (!player) throw new NotFoundException('Player not found');
+
+    const [creditHistory, betHistory] = await Promise.all([
+      this.txRepo.find({
+        where: { userId: playerId },
+        order: { createdAt: 'DESC' },
+        take: 20,
+      }),
+      this.betRepo.find({
+        where: { userId: playerId },
+        order: { createdAt: 'DESC' },
+        take: 20,
+      }),
+    ]);
+
+    return {
+      ok: true,
+      data: {
+        player: {
+          id: String(player.id),
+          username: player.username,
+          agentName: player.agentName,
+          superAgentName: player.superAgentName,
+          creditBalance: Number(Number(player.creditBalance ?? 0).toFixed(2)),
+        },
+        creditHistory: creditHistory.map((tx) => ({
+          id: tx.id,
+          amount: Number(Number(tx.amount ?? 0).toFixed(2)),
+          type: tx.type,
+          remark: tx.remark,
+          at: tx.createdAt,
+        })),
+        betHistory: betHistory.map((b) => ({
+          id: b.id,
+          betNo: b.betNo,
+          game: b.betType,
+          stake: Number(Number(b.amount ?? 0).toFixed(2)),
+          payout: Number(Number(b.payout ?? 0).toFixed(2)),
+          result: b.resultStatus,
+          at: b.createdAt,
+        })),
       },
     };
   }
