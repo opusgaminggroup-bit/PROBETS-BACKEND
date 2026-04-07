@@ -12,10 +12,11 @@ import { LiveCasinoSession } from '../live-casino/entities/live-casino-session.e
 import { LiveCasinoModule } from '../live-casino/live-casino.module';
 import { BetsModule } from '../bets/bets.module';
 import { CreditModule } from '../credit/credit.module';
+import { LiveCasinoGameConfig } from '../live-casino/entities/live-casino-game-config.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, Bet, CreditTransaction, BetExposure, SportsBetQueue, LiveCasinoSession]),
+    TypeOrmModule.forFeature([User, Bet, CreditTransaction, BetExposure, SportsBetQueue, LiveCasinoSession, LiveCasinoGameConfig]),
     LiveCasinoModule,
     BetsModule,
     CreditModule,

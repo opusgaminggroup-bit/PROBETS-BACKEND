@@ -24,6 +24,7 @@ import { CreditService } from '../credit/credit.service';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { LiveCasinoService } from '../live-casino/live-casino.service';
 import { BetType } from '../common/enums/bet-type.enum';
+import { UpsertLiveGameConfigDto } from '../live-casino/dto/upsert-live-game-config.dto';
 
 @Injectable()
 export class AdminService {
@@ -444,9 +445,38 @@ export class AdminService {
     return { ok: true, data: items };
   }
 
+  async sportsQueueAction(
+    actor: { userId: string; role: string },
+    action: 'pause' | 'retry' | 'cancel',
+    payload: { queueId?: string; minutes?: number },
+  ) {
+    await this.getScopeUserIds(actor);
+
+    if (action === 'pause') {
+      const mins = Math.max(0, Number(payload.minutes ?? 0));
+      const data = await this.betsService.setQueuePause(mins);
+      return { ok: true, data, message: mins > 0 ? 'queue paused' : 'queue resumed' };
+    }
+
+    if (!payload.queueId) throw new NotFoundException('queueId required');
+
+    if (action === 'retry') {
+      const data = await this.betsService.retryQueue(payload.queueId);
+      return { ok: true, data, message: 'queue retry scheduled' };
+    }
+
+    const data = await this.betsService.cancelQueue(payload.queueId);
+    return { ok: true, data, message: 'queue canceled' };
+  }
+
   async listLiveCasinoGames(actor: { userId: string; role: string }, provider?: string, category?: string, page = 1, limit = 20) {
     await this.getScopeUserIds(actor);
     return this.liveCasinoService.listGames({ provider, category, page, limit });
+  }
+
+  async upsertLiveCasinoGameConfig(actor: { userId: string; role: string }, dto: UpsertLiveGameConfigDto) {
+    await this.getScopeUserIds(actor);
+    return this.liveCasinoService.upsertGameConfig(dto);
   }
 
   async listLiveCasinoSessions(actor: { userId: string; role: string }, page = 1, limit = 20) {

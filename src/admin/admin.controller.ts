@@ -30,6 +30,8 @@ import { AdjustCreditDto } from '../credit/dto/adjust-credit.dto';
 import { AdminBetsQueryDto } from './dto/admin-bets-query.dto';
 import { SettleBetDto } from '../bets/dto/settle-bet.dto';
 import { AdminDashboardQueryDto } from './dto/admin-dashboard-query.dto';
+import { AdminSportsQueueActionDto } from './dto/admin-sports-queue-action.dto';
+import { UpsertLiveGameConfigDto } from '../live-casino/dto/upsert-live-game-config.dto';
 
 @ApiTags('admin')
 @ApiBearerAuth()
@@ -147,6 +149,15 @@ export class AdminController {
     );
   }
 
+  @Patch('live-casino/games')
+  @ApiOperation({ summary: 'Live Casino 游戏上下架与排序' })
+  upsertLiveCasinoGameConfig(
+    @Req() req: Request & { user?: any },
+    @Body() dto: UpsertLiveGameConfigDto,
+  ) {
+    return this.adminService.upsertLiveCasinoGameConfig(req.user!, dto);
+  }
+
   @Get('live-casino/sessions')
   @ApiOperation({ summary: 'Live Casino 活跃会话' })
   getLiveCasinoSessions(
@@ -191,6 +202,18 @@ export class AdminController {
   @ApiOperation({ summary: 'Sports live queue 列表' })
   getSportsQueue(@Req() req: Request & { user?: any }, @Query('status') status?: string) {
     return this.adminService.listSportsQueue(req.user!, status);
+  }
+
+  @Post('sports/queue/action')
+  @ApiOperation({ summary: 'Sports queue 管理动作（pause/retry/cancel）' })
+  sportsQueueAction(
+    @Req() req: Request & { user?: any },
+    @Body() dto: AdminSportsQueueActionDto,
+  ) {
+    return this.adminService.sportsQueueAction(req.user!, dto.action, {
+      queueId: dto.queueId,
+      minutes: dto.minutes,
+    });
   }
 
   @Get('reports/ggr')

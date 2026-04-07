@@ -4,9 +4,12 @@ import { DataSource, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { LiveCasinoSession } from './entities/live-casino-session.entity';
 import { Bet } from '../bets/entities/bet.entity';
+import { LiveCasinoGameConfig } from './entities/live-casino-game-config.entity';
 import { CreditTransaction } from '../credit/entities/credit-transaction.entity';
 import { CreditTransactionType } from '../common/enums/credit-transaction-type.enum';
 import { BetType } from '../common/enums/bet-type.enum';
+import * as crypto from 'crypto';
+import { UpsertLiveGameConfigDto } from './dto/upsert-live-game-config.dto';
 import { BetResultStatus } from '../common/enums/bet-result-status.enum';
 import { EvolutionAdapter } from './adapters/evolution.adapter';
 import { PragmaticLiveAdapter } from './adapters/pragmatic-live.adapter';
@@ -22,6 +25,8 @@ export class LiveCasinoService {
     private readonly sessionRepo: Repository<LiveCasinoSession>,
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
+    @InjectRepository(LiveCasinoGameConfig)
+    private readonly gameConfigRepo: Repository<LiveCasinoGameConfig>,
     @InjectRepository(Bet)
     private readonly betRepo: Repository<Bet>,
     @InjectRepository(CreditTransaction)
@@ -59,9 +64,23 @@ export class LiveCasinoService {
       limit,
     });
 
+    const cfgRows = await this.gameConfigRepo.find({ where: { provider: adapter.provider } as any });
+    const cfgMap = new Map(cfgRows.map((x) => [`${x.provider}::${x.gameId}`, x]));
+
+    const enriched = items
+      .map((g) => {
+        const cfg = cfgMap.get(`${adapter.provider}::${g.gameId}`);
+        return {
+          ...g,
+          enabled: cfg ? Boolean(cfg.enabled) : g.enabled,
+          sortOrder: cfg ? Number(cfg.sortOrder ?? 0) : 9999,
+        };
+      })
+      .sort((a, b) => Number(a.sortOrder ?? 9999) - Number(b.sortOrder ?? 9999));
+
     return {
       ok: true,
-      data: items,
+      data: enriched,
       meta: {
         provider: adapter.provider,
         page,
@@ -117,7 +136,23 @@ export class LiveCasinoService {
     };
   }
 
-  async handleCallback(payload: any) {
+  private verifyCallbackSignature(rawPayload: any, signatureHeader?: string) {
+    const secret = process.env.LIVE_CASINO_CALLBACK_SECRET;
+    if (!secret) return;
+
+    if (!signatureHeader) {
+      throw new BadRequestException('Missing callback signature');
+    }
+
+    const bodyStr = typeof rawPayload === 'string' ? rawPayload : JSON.stringify(rawPayload ?? {});
+    const expected = crypto.createHmac('sha256', secret).update(bodyStr).digest('hex');
+    if (expected !== signatureHeader) {
+      throw new BadRequestException('Invalid callback signature');
+    }
+  }
+
+  async handleCallback(payload: any, signatureHeader?: string) {
+    this.verifyCallbackSignature(payload, signatureHeader);
     const adapter = this.getAdapter(payload?.provider);
     const normalized = await adapter.normalizeCallback(payload);
 
@@ -297,5 +332,29 @@ export class LiveCasinoService {
     }
 
     return { ok: true, data };
+  }
+
+  async upsertGameConfig(dto: UpsertLiveGameConfigDto) {
+    return this.dataSource.transaction(async (manager) => {
+      let row = await manager.findOne(LiveCasinoGameConfig, {
+        where: { provider: dto.provider, gameId: dto.gameId },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!row) {
+        row = manager.create(LiveCasinoGameConfig, {
+          provider: dto.provider,
+          gameId: dto.gameId,
+          enabled: dto.enabled ?? true,
+          sortOrder: dto.sortOrder ?? 0,
+        });
+      } else {
+        if (dto.enabled != null) row.enabled = dto.enabled;
+        if (dto.sortOrder != null) row.sortOrder = dto.sortOrder;
+      }
+
+      await manager.save(LiveCasinoGameConfig, row);
+      return { ok: true, data: row, message: 'Live casino game config updated' };
+    });
   }
 }

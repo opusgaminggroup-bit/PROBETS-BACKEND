@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { LiveCasinoService } from './live-casino.service';
 import { LiveCasinoGamesQueryDto } from './dto/live-casino-query.dto';
@@ -27,8 +27,8 @@ export class LiveCasinoController {
 
   @Post('callback')
   @ApiOperation({ summary: '接收 provider bet/settle/cancel 回调' })
-  callback(@Body() payload: any) {
-    return this.liveCasinoService.handleCallback(payload);
+  callback(@Body() payload: any, @Headers('x-live-signature') signature?: string) {
+    return this.liveCasinoService.handleCallback(payload, signature);
   }
 
   @Get('sessions/:sessionId')
